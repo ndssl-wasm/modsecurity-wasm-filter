@@ -3,8 +3,9 @@ FROM ubuntu:bionic
 SHELL ["/bin/bash", "-c"] 
 ARG http_proxy 
 ARG https_proxy 
+RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.ustc.edu.cn@g' /etc/apt/sources.list
 RUN apt-get update && apt-get install -y --no-install-recommends apt-utils ca-certificates \ 
-    && apt-get autoremove -y \ 
+    && apt-get autoremove -y \
     && apt-get clean \ 
     && apt-get install -y --no-install-recommends \
     software-properties-common apt-transport-https git wget curl pkg-config \
@@ -23,7 +24,7 @@ RUN git clone -b v3.9.1 https://github.com/protocolbuffers/protobuf \
     && git submodule update --init --recursive \
     && ./autogen.sh \
     && ./configure   \
-    && make \
+    && make -j $(nproc)\
     && make check \
     && make install \
     && cd .. \
@@ -35,8 +36,8 @@ ARG MODSEC_SHA=a68a2c7199b680b09a1cb7b0197bc3a1889512d2
 WORKDIR /root/
 RUN git clone https://github.com/emscripten-core/emsdk.git -b 3.1.16 \ 
     && git clone https://github.com/M4tteoP/libpcre.git -b wasm-emscripten \
-    && git clone https://github.com/SpiderLabs/ModSecurity.git \
-    && git -C ModSecurity checkout $MODSEC_SHA \
+    && git clone https://github.com/ndssl-wasm/ModSecurity.git -b wasm-pmFromFile \
+    # && git -C ModSecurity checkout $MODSEC_SHA \
     && git clone https://github.com/abseil/abseil-cpp -b 20211102.0 \
     && git clone https://github.com/proxy-wasm/proxy-wasm-cpp-sdk \
     && git clone https://github.com/istio/proxy.git -b 1.13.3
@@ -66,7 +67,7 @@ RUN ./build.sh \
     --without-lua --disable-shared --disable-examples --disable-libtool-lock \
     --disable-debug-logs  --disable-mutex-on-pm --without-lmdb --without-maxmind \
     --without-ssdeep --without-pcre2 --with-pcre=./pcre-config \
-    && emmake make -j 4 \
+    && emmake make -j $(nproc) \
     && emmake make install \
     && cd ..
 
@@ -85,7 +86,7 @@ RUN source "/root/emsdk/emsdk_env.sh" \
     && git apply wasm-patches/*.patch \
     && ./autogen.sh \
     && emconfigure ./configure --disable-shared CXXFLAGS="-O3 -flto" \
-    && emmake make \
+    && emmake make -j $(nproc)\
     && cd .. \
     && cp protobuf-wasm/src/.libs/libprotobuf-lite.a /sdk/libprotobuf-lite.a \
     && cp protobuf-wasm/src/.libs/libprotobuf.a /sdk/libprotobuf.a
@@ -101,12 +102,19 @@ RUN mv proxy istio-proxy \
     && cd ..
 
 WORKDIR /root
-ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h /build/ 
+RUN mkdir /wasmplugin
+ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h /wasmplugin/
+# ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h /build/
+
+# RUN cd ~/emsdk \
+#     && source ./emsdk_env.sh \
+#     && cd /build \
+#     && make
 
 RUN cd ~/emsdk \
     && source ./emsdk_env.sh \
-    && cd /build \
-    && make 
+    && cd /wasmplugin \
+    && make
 
-FROM scratch
-COPY --from=0 /build/envoy-wasm-modsecurity-dynamic.wasm /plugin.wasm
+# FROM scratch
+# COPY --from=0 /build/envoy-wasm-modsecurity-dynamic.wasm /plugin.wasm
