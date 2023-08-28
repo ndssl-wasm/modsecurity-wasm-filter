@@ -49,16 +49,10 @@ static_resources:
                     # 插件配置，是一个 json 字符串
                     value: |
                       {
-                        "directives_map": {
-                            "default": [
-                                "Include @demo-conf",
-                                "SecDebugLogLevel 9",
-                                "SecRuleEngine On",
-                                "Include @crs-setup-demo-conf",
-                                "Include @owasp_crs/*.conf"
-                            ]
-                        },
-                        "default_directives": "default"
+                        "rules": [
+                          "default.conf",
+                          "REQUEST-932-APPLICATION-ATTACK-RCE.conf"
+                        ]
                       }
           - name: envoy.filters.http.router
   clusters:
