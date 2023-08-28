@@ -1,7 +1,7 @@
 // NOLINT(namespace-envoy)
+#include <stdio.h>
 #include <fstream>
 #include <iostream>
-#include <stdio.h>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -14,6 +14,7 @@
 //#include "extensions/common/wasm/ext/envoy_proxy_wasm_api.h"
 #include "absl/strings/str_cat.h"
 #include "extensions/common/wasm/json_util.h"
+#include "rules.h"
 #include "utils.h"
 
 using ::nlohmann::json;
@@ -23,13 +24,12 @@ using ::Wasm::Common::JsonObjectIterate;
 using ::Wasm::Common::JsonValueAs;
 
 class ExampleRootContext : public RootContext {
-public:
+ public:
   explicit ExampleRootContext(uint32_t id, std::string_view root_id)
       : RootContext(id, root_id) {}
 
   bool onStart(size_t /* vm_configuration_size */) override;
   bool onConfigure(size_t /* configuration_size */) override;
-  void onTick() override;
 
   /**
    * This static function will be called by modsecurity and internally invoke
@@ -47,7 +47,7 @@ public:
     return modsec_rules_;
   }
 
-private:
+ private:
   // rules config data from root context configurations
   std::string rules_inline_;
   std::string rules_service_;
@@ -60,14 +60,14 @@ private:
   // unit: second
   std::string duration_time_;
 
-  // URL path which configured in the rule server  
+  // URL path which configured in the rule server
   std::string namespace_;
   std::string pod_name_;
   std::string path_;
 };
 
 class ExampleContext : public Context {
-public:
+ public:
   explicit ExampleContext(uint32_t id, RootContext *root) : Context(id, root) {}
 
   void onCreate() override;
@@ -90,7 +90,7 @@ public:
   void onLog() override;
   void onDelete() override;
 
-private:
+ private:
   // rules config data from root context configurations
   std::string rules_inline_;
 
@@ -119,15 +119,8 @@ private:
   ModSecurityStatus status_;
 };
 
-static RegisterContextFactory
-    register_ExampleContext(CONTEXT_FACTORY(ExampleContext),
-                            ROOT_FACTORY(ExampleRootContext));
-
-void ExampleRootContext::onTick() {
-  LOG_WARN("onTick");
-
-  updateRules();
-}
+static RegisterContextFactory register_ExampleContext(
+    CONTEXT_FACTORY(ExampleContext), ROOT_FACTORY(ExampleRootContext));
 
 bool ExampleRootContext::onStart(size_t /* vm_configuration_size */) {
   LOG_TRACE("onStart");
@@ -136,6 +129,15 @@ bool ExampleRootContext::onStart(size_t /* vm_configuration_size */) {
 
 bool ExampleRootContext::onConfigure(size_t configuration_size) {
   LOG_WARN("onConfigure");
+
+  modsecurity::wasm_data::register_data_map(&rule_data);
+
+  modsec_.reset(new modsecurity::ModSecurity());
+  modsec_->setConnectorInformation("ModSecurity-envoy v3.0.4 (ModSecurity)");
+  modsec_->setServerLogCb(ExampleRootContext::logCb,
+                          modsecurity::RuleMessageLogProperty |
+                              modsecurity::IncludeFullHighlightLogProperty);
+  modsec_rules_.reset(new modsecurity::RulesSet());
 
   /* get inline configurations */
   auto configuration_data = getBufferBytes(WasmBufferType::PluginConfiguration,
@@ -148,86 +150,48 @@ bool ExampleRootContext::onConfigure(size_t configuration_size) {
     return false;
   }
 
-  auto j = result.value();
-  auto it = j.find("rules_service");
-  if (it != j.end()) {
-    auto rules_service = JsonValueAs<std::string>(it.value());
-    if (rules_service.second != Wasm::Common::JsonParserResultDetail::OK) {
-      LOG_WARN(absl::StrCat(
-          "cannot parse rules service in plugin configuration JSON string: ",
-          configuration_data->view()));
-      return false;
-    }
-    char buffer[100];
-    sprintf(buffer, "outbound|8888||%s.ruleserver-system.svc.cluster.local",
-            rules_service.first.value().c_str());
-    rules_service_ = std::string(buffer);
-  } else {
-    LOG_WARN(absl::StrCat("rules service must be provided in plugin "
-                          "configuration JSON string: ",
-                          configuration_data->view()));
+  auto &configuration = result.value();
+
+  if (!JsonArrayIterate(configuration, "rules", [&](const json &item) -> bool {
+        auto json_rule_line = JsonValueAs<std::string>(item);
+        if (json_rule_line.second != Wasm::Common::JsonParserResultDetail::OK) {
+          return false;
+        }
+
+        std::string rule_line = json_rule_line.first.value();
+
+        LOG_INFO("Rule line: " + rule_line);
+
+        auto it = rules.find(rule_line);
+        if (it == rules.end()) {  // 如果不是文件而是命令
+          int rulesLoaded = modsec_rules_->load(rule_line.c_str());
+          if (rulesLoaded == -1) {
+            LOG_ERROR(std::string("Failed to load rules"));
+            return false;
+          } else {
+            LOG_WARN(std::string("Loaded plain text rules: ") +
+                     std::to_string(rulesLoaded));
+            return true;
+          };
+        } else {  // 如果是文件
+          int rulesLoaded = modsec_rules_->load(it->second.c_str());
+          if (rulesLoaded == -1) {
+            LOG_ERROR(std::string("Failed to load rules"));
+            return false;
+          } else {
+            LOG_WARN(std::string("Loaded rules from file: ") +
+                     std::to_string(rulesLoaded));
+            return true;
+          };
+        }
+        return true;
+      })) {
+    LOG_WARN("failed to parse configuration for ip_blacklist.");
     return false;
   }
 
-  it = j.find("duration_time");
-  if (it != j.end()) {
-    auto duration_time = JsonValueAs<std::string>(it.value());
-    if (duration_time.second != Wasm::Common::JsonParserResultDetail::OK) {
-      LOG_WARN(absl::StrCat(
-          "cannot parse duration time in plugin configuration JSON string: ",
-          configuration_data->view()));
-      return false;
-    }
-    duration_time_ = duration_time.first.value().c_str();
-    proxy_set_tick_period_milliseconds(std::stoi(duration_time_));
-  } else {
-    LOG_WARN(absl::StrCat("duration time must be provided in plugin "
-                          "configuration JSON string: ",
-                          configuration_data->view()));
-    return false;
-  }
-  proxy_set_tick_period_milliseconds(std::stoi(duration_time_) * 1000);
-
-  it = j.find("name_space");
-  if (it != j.end()){
-    auto name_space = JsonValueAs<std::string>(it.value());
-    if (name_space.second != Wasm::Common::JsonParserResultDetail::OK) {
-      LOG_WARN(absl::StrCat(
-          "cannot parse namespace in plugin configuration JSON string: ",
-          configuration_data->view()));
-      return false;
-    }
-    namespace_ = name_space.first.value().c_str();
-  } else {
-    LOG_WARN(absl::StrCat("namespace must be provided in plugin "
-                          "configuration JSON string: ",
-                          configuration_data->view()));
-    return false;
-  }
-
-  it = j.find("pod_name");
-  if (it != j.end()){
-    auto pod_name = JsonValueAs<std::string>(it.value());
-    if (pod_name.second != Wasm::Common::JsonParserResultDetail::OK) {
-      LOG_WARN(absl::StrCat(
-          "cannot parse pod name in plugin configuration JSON string: ",
-          configuration_data->view()));
-      return false;
-    }
-    pod_name_ = pod_name.first.value().c_str();
-  } else {
-    LOG_WARN(absl::StrCat("pod name must be provided in plugin "
-                          "configuration JSON string: ",
-                          configuration_data->view()));
-    return false;
-  }
-  path_ = "/" + namespace_ + "/" + pod_name_;
-  LOG_INFO("URL path: " + path_);
-
-  update_flag_ = true;
-  if (updateRules() != true) {
-    return false;
-  }
+  rule_data.clear();
+  rules.clear();
 
   return true;
 }
@@ -303,7 +267,6 @@ FilterHeadersStatus ExampleContext::onRequestHeaders(uint32_t /* headers */,
 
 FilterDataStatus ExampleContext::onRequestBody(size_t body_buffer_length,
                                                bool end_of_stream) {
-
   LOG_INFO(
       "************************ onRequestBody ***************************");
   if (status_.intervined || status_.request_processed) {
@@ -541,68 +504,4 @@ void ExampleRootContext::logCb(void *data, const void *rulemessage) {
       ruleMessage->m_isDisruptive ? "Disruptive " : "Non-disruptive ";
   LOG_INFO(isDisruptive +
            std::string(modsecurity::RuleMessage::log(ruleMessage)));
-}
-
- /* get rules from remote service*/
-bool ExampleRootContext::updateRules() {
-  auto context_id = id();
-  auto callback = [this, context_id](uint32_t, size_t body_size, uint32_t) {
-    LOG_WARN("start httpcall callback");
-    if (body_size == 0) {
-      LOG_WARN("async_call failed");
-      return;
-    }
-    auto response_headers =
-        getHeaderMapPairs(WasmHeaderMapType::HttpCallResponseHeaders);
-    // Switch context after getting headers, but before getting body to exercise
-    // both code paths.
-    getContext(context_id)->setEffectiveContext();
-    auto body =
-        getBufferBytes(WasmBufferType::HttpCallResponseBody, 0, body_size);
-    auto response_trailers =
-        getHeaderMapPairs(WasmHeaderMapType::HttpCallResponseTrailers);
-    auto result = std::string(body->view());
-    if (result != rules_inline_) {
-      update_flag_ = true;
-      rules_inline_ = result;
-    } else {
-      update_flag_ = false;
-    }
-
-    LOG_WARN(this->rules_inline_);
-
-    if (!update_flag_) {
-      LOG_WARN("skip update rules since no changes");
-      return;
-    }
-
-    LOG_WARN("start init modc");
-    /* modsecurity initializing */
-    modsec_.reset(new modsecurity::ModSecurity());
-    modsec_->setConnectorInformation("ModSecurity-envoy v3.0.4 (ModSecurity)");
-    modsec_->setServerLogCb(ExampleRootContext::logCb,
-                            modsecurity::RuleMessageLogProperty |
-                                modsecurity::IncludeFullHighlightLogProperty);
-
-    modsec_rules_.reset(new modsecurity::RulesSet());
-    if (!rules_inline().empty()) {
-      int rulesLoaded = modsec_rules_->load(rules_inline().c_str());
-      if (rulesLoaded == -1) {
-        LOG_ERROR(std::string("Failed to load rules"));
-      } else {
-        LOG_WARN(std::string("Loaded inline rules: ") +
-                 std::to_string(rulesLoaded));
-      };
-    }
-  };
-
-  auto r = httpCall(rules_service_,
-                  {{":method", "GET"}, {":path", path_}, {":authority", "modsecurity_wasm"}},
-                  "", {}, 1000, callback);
-  if (r != WasmResult::Ok) {
-    LOG_WARN("failed to get rules");
-    return false;
-  }
-
-  return true;
 }
