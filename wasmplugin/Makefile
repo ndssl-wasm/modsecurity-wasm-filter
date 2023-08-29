@@ -17,5 +17,5 @@ JSON_UTIL = /root/istio-proxy/extensions/common/wasm
 		-I${CPP_API}/google/protobuf -I/usr/local/include -I${ABSL} \
 		--js-library ${CPP_API}/proxy_wasm_intrinsics.js ${ABSL_CPP} $*.cc \
 		${CPP_API}/proxy_wasm_intrinsics.pb.cc ${JSON_UTIL}/json_util.cc \
-		utils.cc ${CPP_CONTEXT_LIB} ${CPP_API}/libprotobuf.a -o $*.wasm \
+		utils.cc rules.cc ${CPP_CONTEXT_LIB} ${CPP_API}/libprotobuf.a -o $*.wasm \
 		-I${MODSECURITY}/include/

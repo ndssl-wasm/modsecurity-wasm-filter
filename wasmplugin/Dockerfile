@@ -103,7 +103,7 @@ RUN mv proxy istio-proxy \
 
 WORKDIR /root
 RUN mkdir /wasmplugin
-ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h /wasmplugin/
+ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h rules.h rules.cc /wasmplugin/
 # ADD Makefile envoy-wasm-modsecurity-dynamic.cc utils.cc utils.h /build/
 
 # RUN cd ~/emsdk \
